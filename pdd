@@ -1,0 +1,57 @@
+#!/bin/bash
+# Copyright 2026 EditorOne XI
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+if ! command -v proot-distro >/dev/null; then
+    echo "proot-distro is not installed." >&2
+    exit 1
+fi
+
+# proot-distro container path might change
+DEBIAN="$PREFIX/var/lib/proot-distro/containers/debian/rootfs/"
+if [ ! -d "$DEBIAN" ]; then
+    echo "Debian proot is not installed. Install with 'proot-distro install debian'." >&2
+    exit 1
+fi
+
+# Android Home/SDK Variables
+if ! rm -f "$HOME/.android" "$HOME/.android-sdk" "$HOME/.gradle"; then
+    echo "Cannot resolve symbolic links for ~/.android, ~/.android-sdk, and ~/.gradle" >&2
+    echo "If you have important files with those directories. Please try to manage them." >&2
+    exit 1
+fi
+ln -s "$DEBIAN/root/.android/" "$HOME/.android"
+ln -s "$DEBIAN/root/.android-sdk/" "$HOME/.android-sdk"
+ln -s "$DEBIAN/root/.gradle/" "$HOME/.gradle"
+
+# App project directory
+if [ ! -e "$HOME/androidAppDev/" ]; then
+    echo "Do you want to create a symbolic link to your Android app projects?"
+    read -r -p "Path (press ENTER if no): " BINDPATH
+    if [ -z "$BINDPATH" ] || [ ! -d "$BINDPATH" ]; then
+        mkdir -p "$HOME/androidAppDev/"
+        echo "Created ~/androidAppDev directory."
+    else
+        ln -s "$BINDPATH" "$HOME/androidAppDev" 2>/dev/null
+        echo "Created ~/androidAppDev -> $BINDPATH symbolic link directory."
+    fi
+fi
+
+proot-distro login debian \
+    --bind "$HOME/androidAppDev/":/root/androidAppDev \
+    --bind "$HOME/.local/share/quilantia-aadm/":/root/.local/share/quilantia-aadm \
+    -e ANDROID_HOME=/root/.android-sdk \
+    -e ANDROID_SDK_ROOT=/root/.android-sdk \
+    -e PATH=/root/.android-sdk/cmdline-tools/latest/bin:/root/.android-sdk/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    "$@" # proceeding args

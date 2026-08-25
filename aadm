@@ -1,0 +1,684 @@
+#!/bin/bash
+# Copyright 2026 EditorOne XI
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# INITIALIZATION -------------------------------------------
+CMDNAME="aadm"
+CMDVERSION="0.1"
+
+check-cmd() {
+    if [ -z "$1" ]; then return 1; fi
+    if ! command -v "$1" >/dev/null; then
+        echo "$CMDNAME: Command $1 not installed. Aborted." >&2
+        exit 1
+    fi
+}
+check-cmd basename
+check-cmd dirname
+check-cmd find
+check-cmd head
+check-cmd realpath
+check-cmd sort
+check-cmd tail
+check-cmd termux-open
+check-cmd tr
+check-cmd unzip
+check-cmd wget
+check-cmd xargs
+
+ESCRED="\033[91m"
+ESCYELLOW="\033[33m"
+ESCGREEN="\033[32m"
+ESCCYAN="\033[36m"
+ESCPURPLE="\033[35m"
+ESCRESET="\033[0m"
+
+if [ "$TERM" = "dumb" ]; then
+    unset -v ESCRED ESCYELLOW ESCGREEN ESCCYAN ESCPURPLE ESCRESET
+fi
+info()      { echo -e "${ESCCYAN}[*]${ESCRESET} $*"; }
+success()   { echo -e "${ESCGREEN}[✓]${ESCRESET} $*"; }
+warn()      { echo -e "${ESCYELLOW}[!]${ESCRESET} $*"; }
+error()     { echo -e "${ESCRED}[✗] $*${ESCRESET}" >&2; exit 1; }
+
+#-----------------------------------------------------------
+synopsis() {
+    echo -e "USAGE: $CMDNAME [OPTIONS] <task> [directory]
+
+OPTIONS:
+    -h          shows this help
+    -q          verbose set to warn/input
+    -v          show wrapper version
+
+Tasks: (D = Debian proot, T = Termux)
+
+D   acli        Install Android command line tools.
+D   gradle      Install Gradle.
+D   new         Create new app project.
+D   exists      Reconfigure Android app project for build.
+T   classpath   Generates Java classpaths for Neovim LSP.
+T   aapt2       Replace aapt2 of Android build tools.
+T   install     Install build APK.
+
+The DIRECTORY argument must be the project's actual
+directory. If not specified, the task 'new' will create a
+new project directory using the APPNAME.
+
+If you ever want to download Android CLI, Gradle, or AAPT2
+on your own. You can refer to these sources:
+
+Android CLI: ${ESCCYAN}https://developer.android.com/studio${ESCRESET}
+     Gradle: ${ESCCYAN}https://gradle.org/releases/${ESCRESET}
+      AAPT2: ${ESCCYAN}https://github.com/ReVanced/aapt2${ESCRESET}
+
+Before configuring projects, make sure that Android CLI,
+and Gradle is already installed and ${ESCYELLOW}\`sdkmanager --licenses\`${ESCRESET}
+in Debian proot is done.
+
+Only run 'aapt2' task after installing an Android SDK
+version from 'new'/'exists', manual install, or it is
+already installed.
+
+Quilantia Android Application Development Manager (aadm)
+Wrapper made by EditorOne XI | EditorOne5312"
+}
+
+OPTIND=1
+while getopts "hqsv" opt; do
+case ${opt} in
+    h) 
+        synopsis
+        exit 1
+        ;;
+    v) 
+        echo "Quilantia $CMDNAME v$CMDVERSION"
+        exit 0
+        ;;
+    q) 
+        info() { return 0; }
+        success() { return 0; }
+        ;;
+    s) 
+        echo "quilantia-${CMDNAME}Project"
+        exit 0
+        ;;
+    *) exit 1 ;;
+esac
+done
+shift $((OPTIND - 1))
+
+[ -z "$1" ] && { synopsis; exit 1; }
+ARGDIR="."
+[ -d "$2" ] && ARGDIR="$2"
+
+# COMMON FUNCTIONS -----------------------------------------
+is_aamd_proj() {
+    if [[ "$(cat "${ARGDIR}/.lsproot")" != "quilantia-${CMDNAME}Project" ]]; then
+        echo "$CMDNAME: directory not an $CMDNAME project." >&2
+        exit 1
+    fi
+    return 0
+}
+
+is_termux_prefix() {
+    [[ "$PREFIX" =~ termux ]]
+}
+
+file_backup() {
+    [ -z "$1" ] && return 1
+    [ -f "$1" ] && mv "$1" "$1.bak" && info "Created backup file for $1"
+}
+
+gradlew_setup() {
+    if [ -z "$1" ] || [ ! -d "$1" ]; then
+        echo "No directory argument received." >&2
+        return 1
+    fi
+    cd "$1"
+    if ! gradle wrapper; then
+        echo
+        warn "Failed to set up ${1}/gradlew, try running this command in Debian proot:"
+        echo -e "> ${ESCCYAN}\`gradle wrapper\`${ESCRESET}"
+    fi
+    echo
+}
+
+#-----------------------------------------------------------
+aadm_gen_project() {
+    is_termux_prefix && error "Reconfiguring a project is only available in Debian proot."
+    PROJDIR="${1:-"."}"
+    PROJNAME="${2:-"EmptyViewsActivity"}"
+    PROJPKGNAME="${3:-"com.example.emptyviewsactivity"}"
+    info "Generating configuration files..."
+
+    # Android SDK Selection --------------------------------
+    local SDKV=''
+    warn "Android SDK Version
+
+Before proceeding, make sure that you have accepted all the
+licenses of SDK Terms of Service and License Agreement in:
+> ${ESCYELLOW}\`sdkmanager --licenses\`${ESCRESET}
+"
+    local ANDROID_SDK_VL=$(find "$ANDROID_SDK_ROOT/build-tools/" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null)
+    local HAS_SDKVL=1
+
+    if [ -n "$ANDROID_SDK_VL" ]; then
+        warn "Select SDK from installed."
+        echo
+        select sdk_sel in $ANDROID_SDK_VL "Other"; do
+            SDKV="$sdk_sel"
+            [[ "$SDKV" == "Other" ]] && SDKV=''
+            break
+        done
+    fi
+
+    if [ -z "$SDKV" ]; then
+        HAS_SDKVL=0
+        warn "Install Android SDK automatically or run this if failed:
+> ${ESCCYAN}\`sdkmanager \"platforms;android-<SDK>\" \"build-tools;<VERSION>\"\`${ESCRESET}
+
+Version Format (e.g. 34.0.0):  #.#.#
+SDK extracted from the version provided.
+The default SDK version is 34.0.0.
+"
+        read -r -p "SDK Version?: " SDKV
+    fi
+    echo
+    if [ -z "$SDKV" ] || [[ ! "$SDKV" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        SDKV="34.0.0"
+        info "Set SDK to default version ($SDKV)."
+    fi
+    local SDKC=${SDKV%%.*}
+    [ "$SDKC" -lt 26 ] && error "Target SDK cannot be lower than 26. Aborted."
+    [ "$HAS_SDKVL" -eq 1 ] && read -r -p "Sync SDK ${SDKC}? [y/n]: " DOSYNC
+    if [ "$HAS_SDKVL" -eq 0 ] || [[ "$DOSYNC" =~ ^[Yy]$ ]]; then
+        info "Fetching Android SDK $SDKC ($SDKV) ..."
+        ! sdkmanager "platforms;android-${SDKC}" "build-tools;${SDKV}" && warn "Failed to fetch Android SDK $SDKC ($SDKV). Skipping."
+    fi
+    # ------------------------------------------------------
+
+    echo
+    warn "App Version"
+    read -r -p "App Version     (default: 1.0): " APPVER
+    read -r -p "App Version Code  (default: 1): " APPVERC
+    echo
+    [ -n "$APPVERC" ] && [[ ! "$APPVERC" =~ ^[0-9]+$ ]] && error "App Version Code must be an integer. Configuration Aborted."
+    APPVER=${APPVER:-"1.0"}
+    APPVERC=${APPVERC:-"1"}
+
+    echo "$PROJPKGNAME v$APPVER ($APPVERC)"
+    echo -n "quilantia-${CMDNAME}Project" > ${PROJDIR}/.lsproot
+
+    file_backup "${PROJDIR}/app/build.gradle"
+    echo "plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace '${PROJPKGNAME}'
+    compileSdk $SDKC
+
+    defaultConfig {
+        applicationId \"${PROJPKGNAME}\"
+        minSdk 26
+        targetSdk $SDKC
+        versionCode $APPVERC
+        versionName \"$APPVER\"
+
+        testInstrumentationRunner \"androidx.test.runner.AndroidJUnitRunner\"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+}" > "${PROJDIR}/app/build.gradle"
+
+    file_backup "${PROJDIR}/app/proguard-rules.pro"
+    cat <<'EOF' > "${PROJDIR}/app/proguard-rules.pro"
+# Add project specific ProGuard rules here.
+# You can control the set of applied configuration files using the
+# proguardFiles setting in build.gradle.
+#
+# For more details, see
+#   http://developer.android.com/guide/developing/tools/proguard.html
+
+# If your project uses WebView with JS, uncomment the following
+# and specify the fully qualified class name to the JavaScript interface
+# class:
+#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
+#   public *;
+#}
+
+# Uncomment this to preserve the line number information for
+# debugging stack traces.
+#-keepattributes SourceFile,LineNumberTable
+
+# If you keep the line number information, uncomment this to
+# hide the original source file name.
+#-renamesourcefileattribute SourceFile
+EOF
+
+    file_backup "${PROJDIR}/build.gradle"
+    cat <<'EOF' > "${PROJDIR}/build.gradle"
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.2'
+    }
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.buildDir
+}
+EOF
+
+    file_backup "${PROJDIR}/gradle.properties"
+    echo "# Specifies the JVM arguments used for the daemon process.
+# The setting is particularly useful for tweaking memory settings.
+org.gradle.jvmargs=-Xmx1024m -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m
+org.gradle.daemon=true
+org.gradle.caching=true
+# When configured, Gradle will run in incubating parallel mode.
+# This option should only be used with decoupled projects. More details, visit
+# http://www.gradle.org/docs/current/userguide/multi_project_builds.html#sec:decoupled_projects
+org.gradle.parallel=true
+# AndroidX package structure to make it clearer which packages are bundled with the
+# Android operating system, and which are packaged with your app's APK
+# https://developer.android.com/topic/libraries/support-library/androidx-rn
+android.useAndroidX=true
+# Explicitly define to use aapt2 from the replacement
+android.aapt2FromMavenOverride=/root/.android-sdk/build-tools/${SDKV}/aapt2
+# Enables namespacing of each library's R class so that its R class includes only the
+# resources declared in the library itself and none from the library's dependencies,
+# thereby reducing the size of the R class for that library
+android.nonTransitiveRClass=true
+" > "${PROJDIR}/gradle.properties"
+
+    echo "sdk.dir=/root/.android-sdk" > "${PROJDIR}/local.properties"
+
+    file_backup "${PROJDIR}/settings.gradle"
+    echo "pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = \"${PROJNAME}\"
+include ':app'
+" > "${PROJDIR}/settings.gradle"
+
+    file_backup "${PROJDIR}/.project"
+    cat <<'EOF' > "${PROJDIR}/.project"
+<?xml version="1.0" encoding="UTF-8"?>
+<projectDescription>
+    <name>RootProject</name>
+    <projects></projects>
+    <buildSpec>
+        <buildCommand>
+            <name>org.eclipse.jdt.core.javabuilder</name>
+        </buildCommand>
+    </buildSpec>
+    <natures>
+        <nature>org.eclipse.jdt.core.javanature</nature>
+    </natures>
+</projectDescription>
+EOF
+
+    file_backup "${PROJDIR}/app/.project"
+    cat <<'EOF' > "${PROJDIR}/app/.project"
+<?xml version="1.0" encoding="UTF-8"?>
+<projectDescription>
+    <name>app</name>
+    <projects></projects>
+    <buildSpec>
+        <buildCommand>
+            <name>org.eclipse.jdt.core.javabuilder</name>
+        </buildCommand>
+    </buildSpec>
+    <natures>
+        <nature>org.eclipse.jdt.core.javanature</nature>
+    </natures>
+</projectDescription>
+EOF
+
+    success "Generated configuration files successfully!"
+}
+
+# SUBCOMMANDS ----------------------------------------------
+
+# Android command line tools
+if [[ "$1" == "acli" ]]; then
+    if is_termux_prefix; then
+        info "Getting downloaded Android CLI from /sdcard/Download/ ..."
+        DEFACLI="$(realpath "$(find /sdcard/Download/ -type f -name 'commandlinetools-linux-*_latest.zip' 2>/dev/null | tail -n 1)" 2>/dev/null)"
+        [ -z "$DEFACLI" ] && error "No Android CLI ZIP found."
+        proot-distro copy -m "$DEFACLI" debian:/root/.android-sdk/cmdline-tools/commandlinetools-linux-ACLI.zip || error "Unable to transfer ZIP file. Aborted."
+        success "Transferred Android CLI successfully. Run the same task in Debian proot for installation."
+        exit 0
+    fi
+    # proot-distro
+    mkdir -p ~/.android-sdk/cmdline-tools
+    cd ~/.android-sdk/cmdline-tools
+
+    DEFACLI="/root/.android-sdk/cmdline-tools/commandlinetools-linux-ACLI.zip"
+    if [ ! -f "$DEFACLI" ]; then
+        DEFACLI="https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip"
+        warn "Download Android command line tools with default URL?"
+        echo "The following URL will be used for download:"
+        echo -e "> ${ESCCYAN}\`${DEFACLI}\`${ESCRESET}"
+        read -r -p "Continue? (Y/n): " DLACLI
+        if [[ ! "$DLACLI" =~ ^[Yy]$ ]]; then
+            warn "Installation aborted by user. Try running the same task in Termux to fetch downloaded Android CLI from /sdcard/Download/ directory."
+            exit 1
+        fi
+        info "Downloading Android CLI..."
+        wget --quiet --show-progress "$DEFACLI"
+    fi
+    info "Installing Android CLI..."
+    unzip -q -o commandlinetools-linux-*.zip
+    mv cmdline-tools latest
+    rm commandlinetools-linux-*.zip
+    success "Installed Android command line tools successfully."
+fi
+
+# AAPT2 replacement
+if [[ "$1" == "aapt2" ]]; then
+    is_termux_prefix || error "Replace aapt2 in Termux or manually replace it."
+    info "Initiating aapt2 from Termux..."
+    pkg install aapt2 -y >/dev/null || error "An error occured running pkg install. Aborted."
+    info "Processing..."
+    find "$ANDROID_SDK_ROOT/build-tools/" -type f -name 'aapt2' 2>/dev/null | xargs -I {} cp "$(command -v aapt2)" "{}" || error "An error occurred replacing aapt2. Aborted."
+    success "Replaced aapt2 successfully."
+fi
+
+# Gradle installation
+if [[ "$1" == "gradle" ]]; then
+    is_termux_prefix && error "Setup gradle in Debian proot."
+    warn "Select Gradle Version"
+    echo "Format can be #.# or #.#.# when available."
+    read -r -p "Gradle version (default: 8.5): " GRDLVER
+    GRADLE_VERSION="${GRDLVER:-"8.5"}"
+    echo
+    info "Downloading Gradle..."
+    cd /opt
+    ! wget --quiet --show-progress https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip && error "Unable to download specified Gradle version."
+    rm -rf /opt/gradle*/
+    info "Installing Gradle..."
+    unzip -q -o gradle-${GRADLE_VERSION}-bin.zip -d /opt
+    GDBIN="$(find . -type f -name 'gradle' -printf '/opt/%P\n' 2>/dev/null | tail -n 1)"
+    ln -sf "$GDBIN" /usr/local/bin/gradle
+    rm -f /opt/gradle*.zip
+    success "Installed Gradle successfully."
+fi
+
+# Create Android app project
+if [[ "$1" == "new" ]]; then
+    is_termux_prefix && error "Creating new project is only available in Debian proot."
+    echo "Create new Android App Project"
+    echo "> Package name format: com.APP_DOMAIN.APP_NAME"
+    echo
+
+    read -r -p "App Name: " RAPPNAME
+    read -r -p "App Domain: " APPDOMAIN
+
+    APPNAME="${RAPPNAME:-"EmptyViewsActivity"}"
+    APPNAME="$(echo "$APPNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9.\n')"
+    APPDOMAIN="${APPDOMAIN:-"example"}"
+    APPDOMAIN="$(echo "$APPDOMAIN" | tr '[:upper:]' '[:lower:]')"
+    TLD="com"
+    [[ "$APPDOMAIN" == "github" ]] && TLD="io"
+    PKGNAME="${TLD}.${APPDOMAIN}.${APPNAME}"
+    PKGDIR="${TLD}/${APPDOMAIN}/${APPNAME}"
+
+    echo
+    info "Package Name: $PKGNAME"
+    info "Generating project directories..."
+
+    [ ! -d "$2" ] && ARGDIR="${ARGDIR}/${APPNAME}"
+    trap 'rm -rf "$ARGDIR"; echo; echo "Removed ${PKGNAME}."; exit 1' SIGINT
+    mkdir -p "${ARGDIR}/app/src/main/java/${PKGDIR}"
+    mkdir -p "${ARGDIR}/app/src/androidTest/java/${PKGDIR}"
+    mkdir -p "${ARGDIR}/app/src/test/java/${PKGDIR}"
+
+    info "Importing resources..."
+    unzip -q -o ~/.local/share/quilantia-aadm/android_res.zip -d "$ARGDIR/app/src/main/res"
+    # App Name Literal
+    echo "<resources>
+    <string name=\"app_name\">${RAPPNAME}</string>
+</resources>
+" > "${ARGDIR}/app/src/main/res/values/strings.xml"
+
+    info "Generating project files..."
+    cat <<'EOF' > "${ARGDIR}/app/src/main/AndroidManifest.xml"
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.EmptyViewsActivity"
+        tools:targetApi="31">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
+EOF
+    echo "package ${PKGNAME};
+
+import androidx.appcompat.app.AppCompatActivity;
+
+import android.os.Bundle;
+
+public class MainActivity extends AppCompatActivity {
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+    }
+}" > "${ARGDIR}/app/src/main/java/${PKGDIR}/MainActivity.java"
+
+    echo "package ${PKGNAME};
+
+import android.content.Context;
+
+import androidx.test.platform.app.InstrumentationRegistry;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import static org.junit.Assert.*;
+
+/**
+ * Instrumented test, which will execute on an Android device.
+ *
+ * @see <a href=\"http://d.android.com/tools/testing\">Testing documentation</a>
+ */
+@RunWith(AndroidJUnit4.class)
+public class ExampleInstrumentedTest {
+    @Test
+    public void useAppContext() {
+        // Context of the app under test.
+        Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        assertEquals(\"${PKGNAME}\", appContext.getPackageName());
+    }
+}" > "${ARGDIR}/app/src/androidTest/java/${PKGDIR}/ExampleInstrumentedTest.java"
+
+    echo "package ${PKGNAME};
+
+import org.junit.Test;
+
+import static org.junit.Assert.*;
+
+/**
+ * Example local unit test, which will execute on the development machine (host).
+ *
+ * @see <a href=\"http://d.android.com/tools/testing\">Testing documentation</a>
+ */
+public class ExampleUnitTest {
+    @Test
+    public void addition_isCorrect() {
+        assertEquals(4, 2 + 2);
+    }
+}" > "${ARGDIR}/app/src/test/java/${PKGDIR}/ExampleUnitTest.java"
+
+    if ! aadm_gen_project "$ARGDIR" "$APPNAME" "$PKGNAME"; then
+        echo "Configuration failed. Aborted." >&2
+        rm -rf "$ARGDIR"
+        exit 1
+    fi
+
+    info "Setting up Gradle wrapper..."
+    gradlew_setup "$ARGDIR"
+
+    success "Project created successfully!"
+fi
+
+# Reconfigure Android App Project
+if [[ "$1" == "exists" ]]; then
+    GETMAINACT="$(find "$ARGDIR/app/src/main/java" -type f -name 'MainActivity.java' 2>/dev/null)"
+    [ -z "$GETMAINACT" ] && error "Project does not have MainActivity.java file. Aborted."
+    dir_path="${GETMAINACT#*/java/}"
+    dir_path="${dir_path%/*}"
+    PKGNAME="${dir_path//\//.}"
+    APPNAME="$(basename "$(dirname "$GETMAINACT")")"
+
+    aadm_gen_project "$ARGDIR" "$APPNAME" "$PKGNAME"
+
+    info "Removing current Gradle setup..."
+    rm -rf "${ARGDIR}/.gradle/" "${ARGDIR}/gradle/" "${ARGDIR}"/gradlew*
+
+    info "Setting up a new Gradle wrapper..."
+    gradlew_setup "$ARGDIR"
+
+    success "Project reconfigured for $CMDNAME. Double check when the build failed."
+fi
+
+# Generates Java classpaths for Neovim LSP
+if [[ "$1" == "classpath" ]]; then
+    is_termux_prefix || error "Java classpath generation only in Termux. Aborted."
+    is_aamd_proj
+
+    # App classpaths for Java LSP
+    CLASSPATH="${ARGDIR}/app/.classpath"
+    info "Generating Java classpaths..."
+
+    file_backup "$CLASSPATH"
+    cat <<'EOF' > "$CLASSPATH"
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+    <classpathentry kind="src" path="src/main/java"/>
+    <classpathentry kind="src" path="src/test/java"/>
+    <classpathentry kind="src" path="src/androidTest/java"/>
+    <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+    <classpathentry kind="output" path="build/classes"/>
+EOF
+
+    # Android Platform SDK (android.jar)
+    ANDROID_JAR=$(find "$HOME/.android-sdk/platforms/" -name "android.jar" 2>/dev/null | sort -g | tail -n 1)
+    if [ -z "$ANDROID_JAR" ]; then
+        rm -f "$CLASSPATH"
+        error "Cannot resolve android.jar classpath. Aborted."
+    fi
+    echo "    <classpathentry kind=\"lib\" path=\"$ANDROID_JAR\"/>" >> "$CLASSPATH"
+
+    # R.jar (if available, after sync build with layout/*.xml)
+    find "$ARGDIR/app/build/" -name "R.jar" 2>/dev/null | xargs -I {} printf '    <classpathentry kind="lib" path="%s"/>\n' "$(realpath "{}")" >> "$CLASSPATH"
+
+    # Gradle cached JAR files
+    find "$HOME/.gradle/caches/" -name '*.jar' 2>/dev/null | grep -v 'gradle-' | xargs -I {} printf '    <classpathentry kind="lib" path="%s"/>\n' "{}" >> "$CLASSPATH"
+
+    # Unpacked AAR (AndroidX) class files
+    find "$HOME/.gradle/caches/" -name "*.aar" 2>/dev/null | xargs -I {} printf '    <classpathentry kind="lib" path="%s"/>\n' "{}" >> "$CLASSPATH"
+
+    echo "</classpath>" >> "$CLASSPATH"
+
+    file_backup "${ARGDIR}/.classpath"
+    cat <<'EOF' > "${ARGDIR}/.classpath"
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+    <classpathentry kind="src" path="app/src/main/java"/>
+    <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+    <classpathentry kind="output" path="app/build/classes"/>
+</classpath>
+EOF
+    success "Finished."
+fi
+
+# Install build APK
+if [[ "$1" == "install" ]]; then
+    is_termux_prefix || error "APK install is a Termux script. Exit proot-distro."
+    is_aamd_proj
+    APK="$(find . -type f -name '*.apk' 2>/dev/null -printf '%p ')"
+    [ -z "$APK" ] && error "No APK file found."
+    echo "Select APK to install:"
+    select apki in $APK "Cancel"; do
+        [[ "$apki" == "Cancel" ]] && break
+        echo
+        info "Installing $apki ..."
+        if [ -z "$3" ]; then
+            termux-open "$apki" || error "Failed to open APK file. Aborted."
+            termux-open "$apki" || error "Failed to open APK file. Aborted."
+        else
+            cp "$apki" /sdcard/Download/ || error "Failed to transfer APK file. Aborted."
+            info "$(basename "$apki") saved to /sdcard/Download/$(basename "$apki")"
+        fi
+        success "Success."
+        break
+    done
+fi
+
