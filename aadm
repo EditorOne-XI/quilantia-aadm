@@ -87,6 +87,10 @@ Before configuring projects, make sure that Android CLI,
 and Gradle is already installed and ${ESCYELLOW}\`sdkmanager --licenses\`${ESCRESET}
 in Debian proot is done.
 
+It is recomended to run 'classpath' only after a sync of
+gradle build to include the resource class (R).
+(e.g. ./gradlew assembleDebug)
+
 Only run 'aapt2' task after installing an Android SDK
 version from 'new'/'exists', manual install, or it is
 already installed.

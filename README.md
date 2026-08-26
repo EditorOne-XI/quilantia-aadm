@@ -18,9 +18,9 @@ The wrapper comes with an automatic project generator and reconfiguration for pr
 - Compatibility Android SDK build.
 - Generate new projects. (EmptyViewsActivity only, Java)
 
-The wrapper includes `classpath` for listing Java/Kotlin classes, and `install` for automatic app installation.
+The wrapper includes `classpath` for listing Java/Kotlin classpaths, and `install` for automatic app installation.
 
-For my custom Java LSP, you can check it [here](neovim_lsp.md).
+For the custom Neovim LSP, you can check it [here](neovim_lsp.md).
 
 ## Requirements
 

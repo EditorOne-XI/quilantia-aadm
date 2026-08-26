@@ -9,7 +9,7 @@
 - [LazyVim to Neovim](#lazyvim-to-neovim)
 - [Groovy/Gradle LSP](#groovygradle-lsp)
 - [Java-Android LSP](#java-android-lsp)
-- [Standard XML LSP (LemMinX)](#standard-xml-lsp-lemminx)
+- [XML LSP (LemMinX + Android)](#xml-lsp-lemminx--android)
 
 ## LazyVim to Neovim
 
@@ -53,7 +53,7 @@ cd ~/.local/share/groovy-language-server
 Next, create a path for LSP config and open it.
 
 ```bash
-mkdir ~/.config/nvim/ftplugin/
+mkdir -p ~/.config/nvim/ftplugin/
 touch ~/.config/nvim/ftplugin/groovy.lua
 nvim ~/.config/nvim/ftplugin/groovy.lua
 ```
@@ -95,13 +95,14 @@ if file then
       vim.opt_local.shiftwidth = 4
       vim.opt_local.expandtab = true
 
-      print("Groovy/Gradle LSP attached!")
+      print("Groovy/Gradle LSP connected!")
     end,
   })
 else
   print("Groovy Language Server JAR not found at: " .. groovy_jar)
 end
 ```
+Save the file and you are good to go.
 
 ---
 
@@ -185,7 +186,7 @@ Save the file then run `:Lazy install` in Neovim command to install additional p
 Next, create a path for LSP config and open it.
 
 ```bash
-mkdir ~/.config/nvim/ftplugin/
+mkdir -p ~/.config/nvim/ftplugin/
 touch ~/.config/nvim/ftplugin/java.lua
 nvim ~/.config/nvim/ftplugin/java.lua
 ```
@@ -236,7 +237,7 @@ local config = {
     "-Declipse.product=org.eclipse.jdt.ls.core.product",
     "-Dlog.protocol=true",
     "-Dlog.level=ALL",
-    "-Xms512m",
+    "-Xms512m", -- Change 512 to adjust load size
     "-Duser.home=" .. home,
     "-Dosgi.configuration.area=" .. jdtls_dir .. "/config_linux",
     "--add-modules=ALL-SYSTEM",
@@ -290,17 +291,15 @@ local config = {
     vim.opt_local.softtabstop = 4
     vim.opt_local.expandtab = true
 
-    print("Java LSP connection complete!")
+    print("Java LSP connected!")
   end,
 }
 
 require('jdtls').start_or_attach(config)
 ```
+Save the file and you are good to go.
 
-## Standard XML LSP (LemMinX)
-
-> [!WARNING]
-> This LSP does not guarantee to work completely.
+## XML LSP (LemMinX + Android)
 
 Download the LemMinX JAR file with proper destination:
 
@@ -314,25 +313,130 @@ wget --quiet --show-progress -O ~/.local/share/xml/schemas/android-layout.xsd ht
 ```
 ---
 
-Next, create a path for the LSP config and open it.
+Next, create a path for the LSP config, and Luasnip. Then open those files.
 
 ```bash
-mkdir ~/.config/nvim/ftplugin/
+mkdir -p ~/.config/nvim/ftplugin/
+mkdir -p ~/.config/nvim/lua/
 touch ~/.config/nvim/ftplugin/xml.lua
-nvim ~/.config/nvim/ftplugin/xml.lua
+touch ~/.config/nvim/lua/android_xml_snip.lua
+nvim ~/.config/nvim/ftplugin/xml.lua ~/.config/nvim/lua/android_xml_snip.lua
 ```
 
-Paste this code inside `xml.lua`:
+Paste this code inside `android_xml_snip.lua`:
+
+```lua
+local ls = require("luasnip")
+local s = ls.snippet
+local t = ls.text_node
+local i = ls.insert_node
+local c = ls.choice_node
+
+local M = {}
+
+local function read_file(path)
+  local file = io.open(path, "r")
+  if not file then return nil end
+  local content = file:read("*a")
+  file:close()
+  return content
+end
+
+function M.generate_snippets(xsd_paths)
+  local android_types = {}
+  local attributes = {}
+  local elements = {}
+
+  for _, path in ipairs(xsd_paths) do
+    local content = read_file(path)
+    if content then
+      -- simpleType enumeration
+      for type_name, body in content:gmatch('<xs:simpleType%s+name="([^"]+)">(.-)</xs:simpleType>') do
+        local enums = {}
+        for enum_val in body:gmatch('<xs:enumeration%s+value="([^"]+)"') do
+          table.insert(enums, enum_val)
+        end
+        if #enums > 0 then
+          android_types[type_name] = enums
+          android_types["android:" .. type_name] = enums
+        end
+      end
+      -- Explicit itemType attribute links
+      for name, item_type in content:gmatch('<xs:attribute%s+name="([^"]+)".-itemType="([^"]+)".-</xs:attribute>') do
+        attributes[name] = item_type
+      end
+      -- Attribute declarations
+      for attr_tag in content:gmatch('<xs:attribute%s+[^>]+>') do
+        local name = attr_tag:match('name="([^"]+)"')
+        local type_attr = attr_tag:match('type="([^"]+)"')
+        if name and not attributes[name] then
+          attributes[name] = type_attr or "xs:string"
+        end
+      end
+      -- Android XML element tag names
+      for elem_name in content:gmatch('<xs:element%s+name="([^"]+)"') do
+        if not elem_name:find("%.") then
+          table.insert(elements, elem_name)
+        end
+      end
+    end
+  end
+
+  local snippets = {}
+  -- Build attribute snippets
+  for name, type_ref in pairs(attributes) do
+    local enum_list = android_types[type_ref]
+    local value_node
+
+    if enum_list and #enum_list > 0 then
+      local choices = {}
+      for _, val in ipairs(enum_list) do
+        table.insert(choices, t(val))
+      end
+      value_node = c(1, choices)
+    elseif type_ref == "xs:boolean" then
+      value_node = c(1, { t("true"), t("false") })
+    else
+      value_node = i(1, "value")
+    end
+
+    local nodes = { t('android:' .. name .. '="'), value_node, t('"') }
+    table.insert(snippets, s({ trig = "android:" .. name, dscr = "Android attribute: " .. name }, vim.deepcopy(nodes)))
+    table.insert(snippets, s({ trig = name, dscr = "Android attr: " .. name }, vim.deepcopy(nodes)))
+  end
+  -- Build XML element block snippets
+  for _, elem in ipairs(elements) do
+    local block_nodes = {
+      t({ "<" .. elem, '    android:layout_width="' }),
+      c(1, { t("match_parent"), t("wrap_content") }),
+      t({ '"', '    android:layout_height="' }),
+      c(2, { t("wrap_content"), t("match_parent") }),
+      t({ '">', '    ' }),
+      i(0),
+      t({ "", "</" .. elem .. ">" }),
+    }
+
+    table.insert(snippets, s({ trig = elem, dscr = "Android Element: <" .. elem .. ">" }, block_nodes))
+  end
+  return snippets
+end
+
+function M.setup(xsd_paths)
+  local snippets = M.generate_snippets(xsd_paths)
+  ls.add_snippets("xml", snippets)
+end
+
+return M
+```
+
+Then paste this code inside `xml.lua`:
 
 ```lua
 local home = os.getenv("HOME")
 local base_dir = home .. "/.local/share/xml"
-
 local lemminx_jar = base_dir .. "/lemminx-uber.jar"
 local android_attrs_path = base_dir .. "/schemas/android-attributes.xsd"
 local android_layout_path = base_dir .. "/schemas/android-layout.xsd"
-local android_attrs_xsd = "file://" .. android_attrs_path
-local android_layout_xsd = "file://" .. android_layout_path
 
 -- Exits if JAR does not exists
 if vim.fn.filereadable(lemminx_jar) == 0 then return end
@@ -356,11 +460,11 @@ vim.lsp.start({
       schemas = {
         {
           fileMatch = { "res/layout/*.xml", "res/layout-*/*.xml" },
-          url = android_layout_xsd,
+          url = "file://" .. android_layout_path,
         },
         {
-          fileMatch = { "res/layout/*.xml", "res/layout-*/*.xml", "res/values/*.xml", "res/drawable/*.xml", "res/**/*.xml" },
-          url = android_attrs_xsd,
+          fileMatch = { "res/values/*.xml", "res/drawable/*.xml", "res/**/*.xml" },
+          url = "file://" .. android_attrs_path,
         },
       },
       completion = {
@@ -369,8 +473,17 @@ vim.lsp.start({
     },
   },
   on_attach = function(_, _)
-    print("LemMinX (XML) LSP Connected!")
+    -- Luasnip generator, in case schemas did not load properly
+    local snippet_ok, snippet_android = pcall(require, "android_xml_snip")
+    if snippet_ok then
+      snippet_android.setup({
+        android_attrs_path,
+        android_layout_path,
+      })
+    end
+    print("LemMinX (XML) LSP connected!")
   end,
 })
 ```
+Save the files and you are good to go.
 
